@@ -2542,7 +2542,7 @@ LOW_PLAYLIST_MAX_AGE =30.0
 LINK_IDLE_TIMEOUT =15.0 
 WINDOW =300 
 MAX_SEGS =120 
-BK_URL_TTL =300 
+BK_URL_TTL =5 
 BACKEND_CHANNELS ={
 'cctv1','cctv2','cctv3','cctv4','cctv5','cctv5p','cctv7','cctv8',
 'cctv9','cctv10','cctv11','cctv12','cctv13','cctv14','cctv15',
@@ -2800,8 +2800,7 @@ def jce_note_access(ch, now):
                                 'jce_accepted_generation', 'jce_sequence_offset',
                                 'jce_live_playlist', 'jce_live_media_end', 'jce_suppress_pdt'):
                         if hasattr(ch, key): delattr(ch, key)
-                    ch.last_built_playlist = ''
-                    ch.last_built_time = 0.0
+                    # 补丁：保留 last_built_playlist 作为 SWR 兜底缓存（新会话冷启动慢时先顶一下）
                     ch.last_ok = 0.0
         finally:
             ch.refresh_lock.release()
@@ -3095,11 +3094,11 @@ def ensure_channel (ch ):
             else :
                 return 
     if wait_only :
-        coalesce_refresh (ch .slug ,lambda :refresh_once (ch ),timeout =5.0 )
+        coalesce_refresh (ch .slug ,lambda :refresh_once (ch ),timeout =15.0 )
         return 
     try :
         if need_fetch :
-            coalesce_refresh (ch .slug ,lambda :refresh_once (ch ),timeout =5.0 )
+            coalesce_refresh (ch .slug ,lambda :refresh_once (ch ),timeout =15.0 )
         if thread_dead :
             ch .thread =threading .Thread (target =refresh_loop ,args =(ch ,),daemon =True )
             ch .thread .start ()
@@ -3619,15 +3618,27 @@ class Handler (BaseHTTPRequestHandler ):
             if ch.mode == 'jce':
                 retry = max(jce_request_gate.remaining(), getattr(ch,'jce_media_blocked_until',0)-time.time())
                 if retry > 0:
+                    log (f'[{canonical }] 503 限流冷却中 (剩 {retry :.0f}s)，且无可用清单',min_interval =10.0 )
                     self._send(503, '低码率接口限流冷却中，请稍后重试\n', head_only=head_only,
                                extra_headers={'Retry-After': str(max(1,math.ceil(retry)))})
                     return
             upstream_pl =fetch_upstream_engine_playlist (canonical ,self .headers .get ('Host',f'localhost:{server_port }'),proto )
             if upstream_pl and '#EXTM3U'in upstream_pl :
                 self ._send (200 ,upstream_pl ,'application/vnd.apple.mpegurl',head_only =head_only )
-                return 
+                return
+            # 补丁：SWR——刷新慢/失败时先回放最近一次清单（≤120 秒），
+            # 避免冷启动竞态、last_ok 过期等场景直接 503 打断播放
+            with ch .lock :
+                stale_pl =ch .last_built_playlist
+                stale_age =time .time ()-ch .last_built_time
+            if stale_pl and '#EXTM3U'in stale_pl and stale_age <=120.0 :
+                log (f'[{canonical }] 新清单未就绪，SWR 回放 {stale_age :.0f}s 前的清单兜底',min_interval =10.0 )
+                trigger_background_refresh (ch )
+                self ._send (200 ,stale_pl ,'application/vnd.apple.mpegurl',head_only =head_only ,extra_headers ={'X-SWR':'STALE'} )
+                return
+            log (f'[{canonical }] 503 暂无数据: {ch .last_error or "刷新未完成且无兜底清单"}',min_interval =10.0 )
             self ._send (503 ,'频道 %s 暂无数据 (%s), 请稍后重试\n'%(ch .name ,ch .last_error or '拉取中'),head_only =head_only )
-            return 
+            return
         self ._send (404 ,'not found\n',head_only =head_only )
 def init_resolver ():
     if resolver is None :
