@@ -2537,7 +2537,7 @@ LOGO_BASE ='https://garysclub.sharewithyou.dpdns.org/logos/ysp-live-logos'
 UA ='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36'
 REFRESH_INTERVAL =10 
 IDLE_TIMEOUT =120 
-LOW_STREAM_IDLE_TIMEOUT =20.0 
+LOW_STREAM_IDLE_TIMEOUT =90.0 
 LOW_PLAYLIST_MAX_AGE =30.0 
 LINK_IDLE_TIMEOUT =15.0 
 WINDOW =300 
@@ -3036,7 +3036,11 @@ def _refresh_once (ch ):
                 log (f'[{ch .slug }] JCE 域名受限，自动切换 bkliveinfo 备用通道',min_interval =10.0 )
                 ok =bk_refresh (ch )
             except JceRateLimited :
-                raise
+                # 补丁：JCE 限流是全局性的（冷却 60s 起步），原地等待只会全员卡死；
+                # 直接切 bkliveinfo 备用通道同步出流，等冷却结束也不切回（与域名受限行为一致）
+                ch .mode ='bk'
+                log (f'[{ch .slug }] JCE 限流，自动切换 bkliveinfo 备用通道',min_interval =10.0 )
+                ok =bk_refresh (ch )
             except Exception :
                 # 补丁：JCE 连续失败（上游清单异常等）3 次后自动切 bkliveinfo 备用通道，
                 # 避免单一通道挂掉导致频道彻底无法播放
@@ -3642,7 +3646,13 @@ def init_resolver ():
             set_resolver_ready (False )
             if 'HTTP 400'in str (e ):
                 resolver .rotate_device_on_400 ('init:'+str (e )[:60 ])
-            backoff =min (15.0 * (1.5 ** min (retry_count - 1 ,4 )),60.0 )
+            if retry_count >=20 :
+                log ('[系统] 设备协议持续 400，已停止重试（本次运行仅走 1080p JCE/BK）')
+                break
+            if retry_count >=5 :
+                backoff =600.0
+            else :
+                backoff =min (15.0 * (1.5 ** min (retry_count - 1 ,4 )),60.0 )
             time .sleep (backoff )
 companion_proc =None 
 def is_port_listening (port :int ,host :str ='127.0.0.1')->bool :
